@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+chemprop_*/
+*.egg-info/
+.DS_Store
