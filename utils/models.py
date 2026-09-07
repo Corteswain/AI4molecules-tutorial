@@ -6,6 +6,7 @@ it is a message-passing neural network that learns its own representation direct
 from SMILES, so it takes DataFrames with a SMILES column instead of feature arrays.
 """
 
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,24 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 from xgboost import XGBRegressor
+
+
+def _chemprop_executable():
+    """Locate the chemprop console script, preferring the one next to the running interpreter.
+
+    Falls back to PATH lookup for environments (e.g. some Colab setups) where the script
+    isn't installed alongside sys.executable.
+    """
+    candidate = Path(sys.executable).parent / "chemprop"
+    if candidate.exists():
+        return str(candidate)
+    found = shutil.which("chemprop")
+    if found:
+        return found
+    raise FileNotFoundError(
+        "Could not find the 'chemprop' command. Make sure it's installed "
+        "(pip install chemprop) in the same environment as this Python interpreter."
+    )
 
 
 def evaluate_predictions(y_true, y_pred):
@@ -71,7 +90,7 @@ def run_chemprop(
 
     ckpt_dir = work_dir / "checkpoint"
     cmd = [
-        "chemprop", "train",
+        _chemprop_executable(), "train",
         "-i", str(train_path), str(val_path), str(test_path),
         "-t", "regression",
         "--target-columns", target_col,

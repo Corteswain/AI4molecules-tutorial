@@ -15,20 +15,29 @@ no local installation needed.
 
 Participants train a solubility predictor (ESOL dataset, 1,128 molecules) and make three
 modeling decisions in sequence, choosing between pre-built options at each step and
-discussing the trade-offs as a group:
+discussing the trade-offs as a group (each step ends with its own discussion prompts —
+not saved up for the end):
 
-1. **Representation** — Morgan fingerprints, MACCS keys, or RDKit physicochemical descriptors.
-2. **Dataset splitting** — random, scaffold-based, or cluster-based.
-3. **Model choice** — Random Forest / XGBoost on hand-crafted features, or Chemprop
-   (a message-passing graph neural network) learning its own representation.
+0. **Dataset splitting** — random, scaffold-based, KMeans clustering, or Butina clustering.
+   Comes first because it only depends on the SMILES and target, not on any later choice.
+   Includes a diagnostic plot: Butina clustering (Tanimoto similarity) as a fixed structural
+   reference, with train/test membership shown on t-SNE and PCA projections side by side.
+1. **Model choice** — Random Forest / XGBoost on hand-crafted features, or Chemprop
+   (a message-passing graph neural network) learning its own representation. Comes before
+   Step 2 because it determines whether that step even applies.
+2. **Representation** — Morgan fingerprints, MACCS keys, or RDKit physicochemical
+   descriptors. Skipped entirely if Chemprop was picked in Step 1.
+3. **Train & evaluate** — put the three choices together and see how the model did.
 
 ## Repository structure
 
 ```
 notebooks/AI4molecules_tutorial.ipynb   the tutorial notebook (open this in Colab)
-utils/representations.py                featurization functions (Step 1)
-utils/splitting.py                      train/test splitting functions (Step 2)
-utils/models.py                         model training/evaluation functions (Step 3)
+scripts/run_local.py                    plain-script version for local testing (no Jupyter needed)
+utils/splitting.py                      train/test splitting functions (Step 0)
+utils/models.py                         model training/evaluation functions (Steps 1 & 3)
+utils/representations.py                featurization functions (Step 2)
+utils/viz.py                            diagnostic plots (e.g. split visualization)
 data/esol.csv                           ESOL solubility dataset
 ```
 
@@ -42,8 +51,19 @@ of the notebook so the focus stays on the modeling decisions and discussion.
 through cell by cell). The first cell installs dependencies and clones this repo — no
 local setup required.
 
-**Locally:** clone the repo, `pip install rdkit scikit-learn xgboost chemprop pandas
-matplotlib jupyter`, and open `notebooks/AI4molecules_tutorial.ipynb` from the repo root.
+**Locally, in Jupyter:** clone the repo, `pip install -r requirements.txt`, and open
+`notebooks/AI4molecules_tutorial.ipynb` from the repo root.
+
+**Locally, as a plain script** (for quick testing without Jupyter — plots are saved as
+PNGs under `outputs/` instead of shown inline):
+
+```
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python scripts/run_local.py                                              # defaults: random / random_forest / morgan
+python scripts/run_local.py --split scaffold --model xgboost --representation maccs
+python scripts/run_local.py --model chemprop --epochs 20
+```
 
 ## Dataset
 

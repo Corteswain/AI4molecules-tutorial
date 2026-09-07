@@ -1,0 +1,7 @@
+rdkit
+scikit-learn
+xgboost
+chemprop
+pandas
+matplotlib
+jupyter

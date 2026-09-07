@@ -4,3 +4,5 @@ __pycache__/
 chemprop_*/
 *.egg-info/
 .DS_Store
+.venv/
+outputs/
