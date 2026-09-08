@@ -7,6 +7,8 @@ called as a single cell in the notebook right after a decision is made.
 
 import numpy as np
 import matplotlib.pyplot as plt
+from rdkit import Chem, DataStructs
+from rdkit.Chem import AllChem
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
@@ -19,7 +21,7 @@ TRAIN_COLOR = plt.cm.viridis(0.15)
 TEST_COLOR = plt.cm.viridis(0.85)
 
 
-def low_dimensional_representation(df, train_idx, test_idx, smiles_col="smiles", cluster_cutoff=0.6, seed=7):
+def low_dimensional_representation(df, train_idx, test_idx, smiles_col="smiles", cluster_cutoff=0.815, seed=7):
     """Visualize where train vs. test molecules fall in chemical space.
 
     Clusters the whole dataset with Butina clustering (Tanimoto similarity of Morgan
@@ -69,3 +71,72 @@ def low_dimensional_representation(df, train_idx, test_idx, smiles_col="smiles",
 
     print(f"{mixed}/{n_clusters} Butina clusters ({frac_mixed:.0%}) contain both train and test molecules.")
     return {"n_clusters": int(n_clusters), "frac_mixed_clusters": float(frac_mixed)}
+
+
+def nearest_neighbor_similarity(df, splits, smiles_col="smiles", k=5):
+    """Box plot: for each split method, how Tanimoto-similar is each test molecule to its
+    k-th nearest neighbor in that method's training set?
+
+    A high k-th-neighbor similarity means test molecules typically have several close
+    analogs already in train — an easy, interpolation-heavy test. A low value means test
+    molecules are genuinely unfamiliar relative to train — the split is testing
+    extrapolation. Using the *k*-th neighbor rather than the 1st makes this a measure of
+    how much of a test molecule's local neighborhood made it into train, not just whether
+    a single near-duplicate slipped through.
+
+    Args:
+        df: the full DataFrame every split in `splits` was computed from.
+        splits: dict mapping split method name -> (train_idx, test_idx), e.g. the `splits`
+            dict built by running every split method in Step 0.
+        smiles_col: SMILES column name.
+        k: which nearest neighbor to report (default: 5th nearest).
+    """
+    mols = [Chem.MolFromSmiles(s) for s in df[smiles_col]]
+    generator = AllChem.GetMorganGenerator(radius=2, fpSize=2048)
+    fps = [generator.GetFingerprint(m) for m in mols]
+
+    labels = list(splits.keys())
+    data = []
+    for name in labels:
+        train_idx, test_idx = splits[name]
+        train_fps = [fps[i] for i in train_idx]
+        kth_sims = []
+        for i in test_idx:
+            sims = DataStructs.BulkTanimotoSimilarity(fps[i], train_fps)
+            sims.sort(reverse=True)
+            kth_sims.append(sims[min(k, len(sims)) - 1])
+        data.append(kth_sims)
+
+    colors = [plt.cm.viridis(x) for x in np.linspace(0.15, 0.85, len(labels))]
+    positions = np.arange(1, len(labels) + 1)
+    box_pos = positions - 0.15
+    violin_pos = positions + 0.20
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    # Violin (KDE shape) to the right of each box — reveals double peaks, skew, etc.
+    # that the box plot's five-number summary alone can't show.
+    violin = ax.violinplot(data, positions=violin_pos, widths=0.35, showmedians=True, showextrema=False)
+    for body, color in zip(violin["bodies"], colors):
+        body.set_facecolor(color)
+        body.set_alpha(0.5)
+        body.set_edgecolor("none")
+    violin["cmedians"].set_color("black")
+
+    # Box plot to the left, at its usual narrow width, for precise quartiles/outliers.
+    box = ax.boxplot(data, positions=box_pos, widths=0.22, patch_artist=True)
+    for patch, color in zip(box["boxes"], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.8)
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel(f"Tanimoto similarity to {k}th-nearest train neighbor")
+    ax.set_title(f"Test-set similarity to training set ({k}-NN Tanimoto)")
+    plt.tight_layout()
+    plt.show()
+
+    stats = {name: {"median": float(np.median(vals)), "mean": float(np.mean(vals))} for name, vals in zip(labels, data)}
+    for name, s in stats.items():
+        print(f"{name:10s}: median={s['median']:.3f}  mean={s['mean']:.3f}")
+    return stats

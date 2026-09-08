@@ -19,7 +19,7 @@ from sklearn.cluster import KMeans
 from .representations import featurize_morgan_fingerprint
 
 
-def random_split(df, smiles_col="smiles", test_size=0.2, seed=42):
+def random_split(df, smiles_col="smiles", test_size=0.15, seed=42):
     """Simple i.i.d. shuffle-and-split: no relationship between molecules is considered."""
     rng = np.random.RandomState(seed)
     idx = rng.permutation(len(df))
@@ -34,7 +34,7 @@ def _murcko_scaffold(smiles):
     return Chem.MolToSmiles(scaffold)
 
 
-def scaffold_split(df, smiles_col="smiles", test_size=0.2, seed=42):
+def scaffold_split(df, smiles_col="smiles", test_size=0.15, seed=42, tolerance=0.05):
     """Group molecules by Bemis-Murcko scaffold; whole scaffold groups go to train or test.
 
     This keeps near-identical molecules (same core, different substituents) on the
@@ -45,22 +45,14 @@ def scaffold_split(df, smiles_col="smiles", test_size=0.2, seed=42):
     for i, smi in enumerate(df[smiles_col]):
         scaffolds.setdefault(_murcko_scaffold(smi), []).append(i)
 
-    rng = np.random.RandomState(seed)
-    groups = list(scaffolds.values())
-    rng.shuffle(groups)
-    groups.sort(key=len, reverse=True)  # largest scaffold families stay intact in train
-
-    n_test_target = int(len(df) * test_size)
-    test_idx, train_idx = [], []
-    for group in groups:
-        if len(test_idx) < n_test_target:
-            test_idx.extend(group)
-        else:
-            train_idx.extend(group)
-    return np.sort(train_idx), np.sort(test_idx)
+    labels = np.empty(len(df), dtype=int)
+    for group_id, members in enumerate(scaffolds.values()):
+        for i in members:
+            labels[i] = group_id
+    return _split_by_cluster_labels(labels, test_size, seed, tolerance=tolerance)
 
 
-def kmeans_split(df, smiles_col="smiles", test_size=0.2, n_clusters=20, seed=42, tolerance=0.05):
+def kmeans_split(df, smiles_col="smiles", test_size=0.15, n_clusters=20, seed=42, tolerance=0.05):
     """Cluster molecules (Morgan fingerprints + KMeans), then hold out whole clusters.
 
     Like scaffold_split, this tests extrapolation to structurally distinct regions of
@@ -78,7 +70,7 @@ def kmeans_split(df, smiles_col="smiles", test_size=0.2, n_clusters=20, seed=42,
     return _split_by_cluster_labels(labels, test_size, seed, tolerance=tolerance)
 
 
-def butina_cluster_ids(smiles_list, cutoff=0.6, radius=2, n_bits=2048):
+def butina_cluster_ids(smiles_list, cutoff=0.815, radius=2, n_bits=2048):
     """Cluster molecules by Tanimoto similarity of Morgan fingerprints (Butina algorithm).
 
     Returns one cluster id per molecule. `cutoff` is a Tanimoto *distance* threshold
@@ -103,7 +95,7 @@ def butina_cluster_ids(smiles_list, cutoff=0.6, radius=2, n_bits=2048):
     return cluster_id
 
 
-def butina_split(df, smiles_col="smiles", test_size=0.2, cutoff=0.6, seed=42, tolerance=0.05):
+def butina_split(df, smiles_col="smiles", test_size=0.15, cutoff=0.815, seed=42, tolerance=0.05):
     """Cluster molecules by Tanimoto similarity (Butina algorithm), then hold out whole clusters.
 
     Same idea as kmeans_split, but using the standard cheminformatics notion of
