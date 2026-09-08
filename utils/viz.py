@@ -15,25 +15,28 @@ from sklearn.manifold import TSNE
 from .representations import featurize_morgan_fingerprint
 from .splitting import butina_cluster_ids
 
-# Shared palette (viridis) so train/test always render in the same two colors
+# Shared palette (viridis) so train/val/test always render in the same three colors
 # everywhere in the tutorial, not just within this module.
 TRAIN_COLOR = plt.cm.viridis(0.15)
+VAL_COLOR = plt.cm.viridis(0.5)
 TEST_COLOR = plt.cm.viridis(0.85)
 
 
-def low_dimensional_representation(df, train_idx, test_idx, smiles_col="smiles", cluster_cutoff=0.815, seed=7):
-    """Visualize where train vs. test molecules fall in chemical space.
+def low_dimensional_representation(df, train_idx, val_idx, test_idx, smiles_col="smiles", cluster_cutoff=0.815, seed=7):
+    """Visualize where train vs. val vs. test molecules fall in chemical space.
 
     Clusters the whole dataset with Butina clustering (Tanimoto similarity of Morgan
     fingerprints) as a structural reference — the same method used by butina_split
-    — then shows train/test membership on t-SNE and PCA projections side by side. Also
-    reports what fraction of Butina clusters end up "mixed" (containing both train and
-    test molecules): a high mixed fraction means train and test are drawn from the same
-    structural neighborhoods (as with a random split, or kmeans_split disagreeing
-    with Butina near its own cluster boundaries); a low mixed fraction means test
-    molecules sit in their own structurally distinct regions (as scaffold/cluster splits
-    are designed to produce). Picking butina_split as the split method should
-    drive this close to 0%, since it's the same clustering shown here.
+    — then shows train/val/test membership on t-SNE and PCA projections side by side.
+    Also reports what fraction of Butina clusters end up "mixed" (containing test
+    molecules alongside train and/or val — i.e. the true holdout isn't as separated from
+    what the model actually saw during development as it looks): a high mixed fraction
+    means test is drawn from the same structural neighborhoods as train/val (as with a
+    random split, or kmeans_split disagreeing with Butina near its own cluster
+    boundaries); a low mixed fraction means test molecules sit in their own structurally
+    distinct regions (as scaffold/cluster splits are designed to produce). Picking
+    butina_split as the split method should drive this close to 0%, since it's the same
+    clustering shown here.
     """
     smiles_list = df[smiles_col].tolist()
     X = featurize_morgan_fingerprint(smiles_list)
@@ -43,6 +46,9 @@ def low_dimensional_representation(df, train_idx, test_idx, smiles_col="smiles",
 
     is_test = np.zeros(len(df), dtype=bool)
     is_test[test_idx] = True
+    is_val = np.zeros(len(df), dtype=bool)
+    is_val[val_idx] = True
+    is_train = ~is_test & ~is_val
 
     mixed = 0
     for cid in range(n_clusters):
@@ -56,20 +62,21 @@ def low_dimensional_representation(df, train_idx, test_idx, smiles_col="smiles",
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     for ax, coords, title in [(axes[0], tsne_coords, "t-SNE"), (axes[1], pca_coords, "PCA")]:
-        ax.scatter(coords[~is_test, 0], coords[~is_test, 1], s=14, alpha=0.6, label="train", color=TRAIN_COLOR)
+        ax.scatter(coords[is_train, 0], coords[is_train, 1], s=14, alpha=0.6, label="train", color=TRAIN_COLOR)
+        ax.scatter(coords[is_val, 0], coords[is_val, 1], s=14, alpha=0.6, label="val", color=VAL_COLOR)
         ax.scatter(coords[is_test, 0], coords[is_test, 1], s=14, alpha=0.8, label="test", color=TEST_COLOR)
         ax.set_title(title)
         ax.set_xticks([])
         ax.set_yticks([])
     axes[0].legend(loc="best")
     fig.suptitle(
-        f"Train/test split over chemical space  —  {n_clusters} Butina clusters "
-        f"(cutoff={cluster_cutoff}), {frac_mixed:.0%} contain both train and test"
+        f"Train/val/test split over chemical space  —  {n_clusters} Butina clusters "
+        f"(cutoff={cluster_cutoff}), {frac_mixed:.0%} mix test with train/val"
     )
     plt.tight_layout()
     plt.show()
 
-    print(f"{mixed}/{n_clusters} Butina clusters ({frac_mixed:.0%}) contain both train and test molecules.")
+    print(f"{mixed}/{n_clusters} Butina clusters ({frac_mixed:.0%}) contain test alongside train and/or val molecules.")
     return {"n_clusters": int(n_clusters), "frac_mixed_clusters": float(frac_mixed)}
 
 
@@ -86,8 +93,8 @@ def nearest_neighbor_similarity(df, splits, smiles_col="smiles", k=5):
 
     Args:
         df: the full DataFrame every split in `splits` was computed from.
-        splits: dict mapping split method name -> (train_idx, test_idx), e.g. the `splits`
-            dict built by running every split method in Step 0.
+        splits: dict mapping split method name -> (train_idx, val_idx, test_idx), e.g.
+            the `splits` dict built by running every split method in Step 0.
         smiles_col: SMILES column name.
         k: which nearest neighbor to report (default: 5th nearest).
     """
@@ -98,7 +105,7 @@ def nearest_neighbor_similarity(df, splits, smiles_col="smiles", k=5):
     labels = list(splits.keys())
     data = []
     for name in labels:
-        train_idx, test_idx = splits[name]
+        train_idx, val_idx, test_idx = splits[name]
         train_fps = [fps[i] for i in train_idx]
         kth_sims = []
         for i in test_idx:

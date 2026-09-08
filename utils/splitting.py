@@ -1,12 +1,14 @@
 """Dataset splitting functions for the AI4molecules tutorial.
 
-Each function takes a DataFrame and returns (train_idx, test_idx): integer
-positional indices into the DataFrame. Returning indices (rather than the
-split DataFrames themselves) lets you compute a representation once for the
-whole dataset and then slice both the DataFrame and the feature matrix the
-same way. The functions differ in *how* molecules are assigned to train vs.
-test, which changes how optimistic or realistic the resulting performance
-estimate is.
+Each function takes a DataFrame and returns (train_idx, val_idx, test_idx): integer
+positional indices into the DataFrame. Returning indices (rather than the split
+DataFrames themselves) lets you compute a representation once for the whole dataset and
+then slice the DataFrame and the feature matrix the same way. `test_idx` is a *true
+holdout*: nothing in this tutorial trains, tunes, or picks a checkpoint using it — it's
+only ever touched once, at final evaluation. `val_idx` is what every model uses instead
+for anything that needs feedback during development (Chemprop's early stopping, or your
+own informal checks). The functions differ in *how* molecules are assigned to each set,
+which changes how optimistic or realistic the resulting performance estimate is.
 """
 
 import numpy as np
@@ -19,13 +21,16 @@ from sklearn.cluster import KMeans
 from .representations import featurize_morgan_fingerprint
 
 
-def random_split(df, smiles_col="smiles", test_size=0.15, seed=42):
+def random_split(df, smiles_col="smiles", val_size=0.15, test_size=0.15, seed=42):
     """Simple i.i.d. shuffle-and-split: no relationship between molecules is considered."""
     rng = np.random.RandomState(seed)
     idx = rng.permutation(len(df))
     n_test = int(len(df) * test_size)
-    test_idx, train_idx = idx[:n_test], idx[n_test:]
-    return np.sort(train_idx), np.sort(test_idx)
+    n_val = int(len(df) * val_size)
+    test_idx = idx[:n_test]
+    val_idx = idx[n_test : n_test + n_val]
+    train_idx = idx[n_test + n_val :]
+    return np.sort(train_idx), np.sort(val_idx), np.sort(test_idx)
 
 
 def _murcko_scaffold(smiles):
@@ -34,8 +39,8 @@ def _murcko_scaffold(smiles):
     return Chem.MolToSmiles(scaffold)
 
 
-def scaffold_split(df, smiles_col="smiles", test_size=0.15, seed=42, tolerance=0.05):
-    """Group molecules by Bemis-Murcko scaffold; whole scaffold groups go to train or test.
+def scaffold_split(df, smiles_col="smiles", val_size=0.15, test_size=0.15, seed=42, tolerance=0.05):
+    """Group molecules by Bemis-Murcko scaffold; whole scaffold groups go to train, val, or test.
 
     This keeps near-identical molecules (same core, different substituents) on the
     same side of the split, giving a more honest estimate of generalization to new
@@ -49,10 +54,10 @@ def scaffold_split(df, smiles_col="smiles", test_size=0.15, seed=42, tolerance=0
     for group_id, members in enumerate(scaffolds.values()):
         for i in members:
             labels[i] = group_id
-    return _split_by_cluster_labels(labels, test_size, seed, tolerance=tolerance)
+    return _split_by_cluster_labels(labels, val_size, test_size, seed, tolerance=tolerance)
 
 
-def kmeans_split(df, smiles_col="smiles", test_size=0.15, n_clusters=20, seed=42, tolerance=0.05):
+def kmeans_split(df, smiles_col="smiles", val_size=0.15, test_size=0.15, n_clusters=20, seed=42, tolerance=0.05):
     """Cluster molecules (Morgan fingerprints + KMeans), then hold out whole clusters.
 
     Like scaffold_split, this tests extrapolation to structurally distinct regions of
@@ -67,7 +72,7 @@ def kmeans_split(df, smiles_col="smiles", test_size=0.15, n_clusters=20, seed=42
     X = featurize_morgan_fingerprint(df[smiles_col].tolist())
     k = max(1, min(n_clusters, len(df) // 5))
     labels = KMeans(n_clusters=k, random_state=seed, n_init=10).fit_predict(X)
-    return _split_by_cluster_labels(labels, test_size, seed, tolerance=tolerance)
+    return _split_by_cluster_labels(labels, val_size, test_size, seed, tolerance=tolerance)
 
 
 def butina_cluster_ids(smiles_list, cutoff=0.815, radius=2, n_bits=2048):
@@ -95,7 +100,7 @@ def butina_cluster_ids(smiles_list, cutoff=0.815, radius=2, n_bits=2048):
     return cluster_id
 
 
-def butina_split(df, smiles_col="smiles", test_size=0.15, cutoff=0.815, seed=42, tolerance=0.05):
+def butina_split(df, smiles_col="smiles", val_size=0.15, test_size=0.15, cutoff=0.815, seed=42, tolerance=0.05):
     """Cluster molecules by Tanimoto similarity (Butina algorithm), then hold out whole clusters.
 
     Same idea as kmeans_split, but using the standard cheminformatics notion of
@@ -104,58 +109,80 @@ def butina_split(df, smiles_col="smiles", test_size=0.15, cutoff=0.815, seed=42,
     clusters directly from pairwise similarity.
     """
     labels = butina_cluster_ids(df[smiles_col].tolist(), cutoff=cutoff)
-    return _split_by_cluster_labels(labels, test_size, seed, tolerance=tolerance)
+    return _split_by_cluster_labels(labels, val_size, test_size, seed, tolerance=tolerance)
 
 
-def _split_by_cluster_labels(labels, test_size, seed, tolerance=0.05, max_consecutive_rejections=5, max_restarts=1000):
-    """Greedily add whole clusters to the test set until its size lands within
-    [test_size - tolerance, test_size + tolerance] of the dataset.
+def _peel_holdout(labels, pool_idx, target_size, n_total, seed, tolerance, max_consecutive_rejections, max_restarts):
+    """Select whole groups (per `labels`) from `pool_idx` to form a holdout set whose size,
+    as a fraction of `n_total`, lands within [target_size - tolerance, target_size + tolerance].
 
-    Clusters are drawn in random order. A cluster that would push the test set *above*
-    the tolerance band is rejected (skipped, left for train) rather than accepted
-    outright — unlike a plain "stop once we've reached the target" rule, which lets a
-    single large cluster massively overshoot the target in one step. If
-    max_consecutive_rejections candidates in a row are all rejected (a sign the
-    remaining clusters don't fit what's left of the band), the whole attempt is
-    discarded and restarted from an empty test set with a fresh random order.
+    Groups are drawn in random order from the pool. A group that would push the holdout
+    set *above* the tolerance band is rejected (skipped, left in the remaining pool)
+    rather than accepted outright — unlike a plain "stop once we've reached the target"
+    rule, which lets a single large group massively overshoot the target in one step. If
+    max_consecutive_rejections candidates in a row are all rejected (a sign the remaining
+    groups don't fit what's left of the band), the whole attempt is discarded and
+    restarted from an empty holdout set with a fresh random order.
+
+    Returns (remaining_pool_idx, holdout_idx).
     """
-    n = len(labels)
-    lower = (test_size - tolerance) * n
-    upper = (test_size + tolerance) * n
+    lower = (target_size - tolerance) * n_total
+    upper = (target_size + tolerance) * n_total
 
-    cluster_ids_all = list(range(labels.max() + 1))
-    members_by_cluster = {cid: np.where(labels == cid)[0].tolist() for cid in cluster_ids_all}
+    groups = {}
+    for i in pool_idx:
+        groups.setdefault(labels[i], []).append(i)
+    group_ids_all = list(groups.keys())
 
     rng = np.random.RandomState(seed)
     for _ in range(max_restarts):
-        order = cluster_ids_all.copy()
+        order = group_ids_all.copy()
         rng.shuffle(order)
 
-        test_idx = []
+        holdout = []
         used = set()
         consecutive_rejections = 0
-        for cid in order:
-            new_size = len(test_idx) + len(members_by_cluster[cid])
+        for gid in order:
+            new_size = len(holdout) + len(groups[gid])
             if new_size > upper:
                 consecutive_rejections += 1
                 if consecutive_rejections >= max_consecutive_rejections:
                     break  # stuck: abandon this attempt and reshuffle from scratch
-                continue  # reject this cluster, try the next one
+                continue  # reject this group, try the next one
 
             consecutive_rejections = 0
-            test_idx.extend(members_by_cluster[cid])
-            used.add(cid)
-            if len(test_idx) >= lower:
-                train_idx = [i for cid2 in cluster_ids_all if cid2 not in used for i in members_by_cluster[cid2]]
-                return np.sort(train_idx), np.sort(test_idx)
-        # exhausted all clusters (or gave up after too many rejections) without landing
-        # in the band: fall through and retry with a new shuffle
+            holdout.extend(groups[gid])
+            used.add(gid)
+            if len(holdout) >= lower:
+                remaining = [i for gid2 in group_ids_all if gid2 not in used for i in groups[gid2]]
+                return np.array(sorted(remaining)), np.array(sorted(holdout))
+        # exhausted the pool (or gave up after too many rejections) without landing in
+        # the band: fall through and retry with a new shuffle
 
     raise RuntimeError(
-        f"Could not land the test set within {tolerance:.0%} of test_size={test_size:.0%} "
+        f"Could not land a holdout set within {tolerance:.0%} of target_size={target_size:.0%} "
         f"after {max_restarts} attempts. Try a larger `tolerance`, or a cutoff/n_clusters "
-        "that produces less lopsided cluster sizes."
+        "that produces less lopsided group sizes."
     )
+
+
+def _split_by_cluster_labels(
+    labels, val_size, test_size, seed, tolerance=0.05, max_consecutive_rejections=5, max_restarts=1000
+):
+    """Peel a test holdout, then a val holdout, off the full dataset (see _peel_holdout),
+    leaving the remainder as train. Both val_size and test_size are fractions of the full
+    dataset — sizes don't get renormalized against the shrinking pool — so, e.g.,
+    val_size=test_size=0.15 always aims for roughly 70/15/15 train/val/test regardless of
+    which is peeled first.
+    """
+    n = len(labels)
+    kwargs = dict(
+        n_total=n, tolerance=tolerance,
+        max_consecutive_rejections=max_consecutive_rejections, max_restarts=max_restarts,
+    )
+    remaining_idx, test_idx = _peel_holdout(labels, np.arange(n), test_size, seed=seed, **kwargs)
+    train_idx, val_idx = _peel_holdout(labels, remaining_idx, val_size, seed=seed + 1, **kwargs)
+    return np.sort(train_idx), np.sort(val_idx), np.sort(test_idx)
 
 
 SPLITTERS = {
