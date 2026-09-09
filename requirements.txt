@@ -1,6 +1,6 @@
 rdkit
 scikit-learn
-xgboost
+scipy
 chemprop
 pandas
 matplotlib

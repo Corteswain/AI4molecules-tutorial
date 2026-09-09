@@ -6,7 +6,7 @@ plots are saved as PNG files under outputs/ instead of being displayed inline.
 
 Usage:
     python scripts/run_local.py
-    python scripts/run_local.py --split scaffold --model xgboost --representation maccs
+    python scripts/run_local.py --split scaffold --model random_forest --representation maccs
     python scripts/run_local.py --model chemprop --epochs 20
 """
 

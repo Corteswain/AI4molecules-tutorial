@@ -1,9 +1,15 @@
 """Model-training functions for the AI4molecules tutorial.
 
-Random Forest and XGBoost operate on hand-crafted feature vectors (X_train/X_test,
+Random Forest operates on hand-crafted feature vectors (X_train/X_val,
 produced by a representation function from representations.py). Chemprop is different:
 it is a message-passing neural network that learns its own representation directly
 from SMILES, so it takes DataFrames with a SMILES column instead of feature arrays.
+
+run_random_forest always trains on train and evaluates on val — that's it, no test set. Used
+by Step 4's hyperparameter search. run_chemprop follows the same train/val-only contract by
+default, but Step 5's nested cross-validation needs a genuine third set (an outer test fold),
+so it optionally accepts one; see its docstring. Either way, the real evaluation set
+(data/real.csv) is deliberately never touched by any of this code.
 """
 
 import shutil
@@ -12,11 +18,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score
-from xgboost import XGBRegressor
 
 
 def _chemprop_executable():
@@ -43,59 +47,50 @@ def evaluate_predictions(y_true, y_pred):
     return {"rmse": rmse, "r2": r2}
 
 
-def _val_test_result(model, y_val, y_pred_val, y_test, y_pred_test):
-    """Bundle val + test predictions/metrics into one result dict.
-
-    Top-level `y_pred`/`rmse`/`r2` are always the *test* (true holdout) numbers — the
-    ones that count. `y_pred_val`/`val_rmse`/`val_r2` are there for comparison, e.g. to
-    notice a model that looks great on val but falls apart on test.
-    """
-    test_metrics = evaluate_predictions(y_test, y_pred_test)
-    val_metrics = evaluate_predictions(y_val, y_pred_val)
-    return {
-        "model": model,
-        "y_pred": y_pred_test, "rmse": test_metrics["rmse"], "r2": test_metrics["r2"],
-        "y_pred_val": y_pred_val, "val_rmse": val_metrics["rmse"], "val_r2": val_metrics["r2"],
-    }
-
-
-def run_random_forest(X_train, y_train, X_val, y_val, X_test, y_test, seed=42, **kwargs):
-    model = RandomForestRegressor(n_estimators=300, random_state=seed, n_jobs=-1, **kwargs)
+def run_random_forest(X_train, y_train, X_val, y_val, seed=42, **kwargs):
+    params = {"n_estimators": 300, **kwargs}
+    model = RandomForestRegressor(random_state=seed, n_jobs=-1, **params)
     model.fit(X_train, y_train)
-    return _val_test_result(model, y_val, model.predict(X_val), y_test, model.predict(X_test))
-
-
-def run_xgboost(X_train, y_train, X_val, y_val, X_test, y_test, seed=42, **kwargs):
-    model = XGBRegressor(
-        n_estimators=300, max_depth=6, learning_rate=0.1, random_state=seed, n_jobs=-1, **kwargs
-    )
-    model.fit(X_train, y_train)
-    return _val_test_result(model, y_val, model.predict(X_val), y_test, model.predict(X_test))
+    y_pred = model.predict(X_val)
+    return {"model": model, "y_pred": y_pred, **evaluate_predictions(y_val, y_pred)}
 
 
 def run_chemprop(
     train_df,
     val_df,
-    test_df,
+    test_df=None,
     smiles_col="smiles",
     target_col="measured_log_solubility_mol_per_L",
     epochs=30,
     seed=42,
     work_dir=None,
+    **hparams,
 ):
-    """Train a chemprop MPNN directly on SMILES and evaluate on val_df and test_df.
+    """Train a chemprop MPNN directly on SMILES and evaluate on val_df (or test_df, if given).
 
-    Uses val_df — the same validation split every other model in this tutorial gets,
-    from the splitting step, not a separately re-derived one — for early stopping /
-    checkpoint selection, and keeps test_df fully held out.
+    Extra keyword arguments are passed through as CLI flags for a quick hyperparameter
+    search, e.g. run_chemprop(..., depth=2) adds `--depth 2`.
+
+    val_df is always used for early stopping / checkpoint selection (chemprop's normal role
+    for it). If test_df is given, it's passed as chemprop's genuine "test" input and the
+    predictions this function returns are for test_df (used by Step 5's nested CV, which has
+    a real outer test fold). If test_df is omitted (the default — what Steps 1-4 use, since
+    they have no test set at all), val_df is passed again as chemprop's "test" input instead,
+    so the predictions returned are for val_df — chemprop only writes predictions for
+    whatever it's told is the test set.
     """
+    eval_df = test_df if test_df is not None else val_df
     work_dir = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="chemprop_"))
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    train_path, val_path, test_path = work_dir / "train.csv", work_dir / "val.csv", work_dir / "test.csv"
+    train_path, val_path = work_dir / "train.csv", work_dir / "val.csv"
     train_df[[smiles_col, target_col]].to_csv(train_path, index=False)
     val_df[[smiles_col, target_col]].to_csv(val_path, index=False)
-    test_df[[smiles_col, target_col]].to_csv(test_path, index=False)
+    if test_df is not None:
+        test_path = work_dir / "test.csv"
+        test_df[[smiles_col, target_col]].to_csv(test_path, index=False)
+    else:
+        test_path = val_path
 
     ckpt_dir = work_dir / "checkpoint"
     cmd = [
@@ -110,46 +105,53 @@ def run_chemprop(
         "-n", "0",
         "--pytorch-seed", str(seed),
     ]
+    for key, value in hparams.items():
+        cmd.extend([f"--{key.replace('_', '-')}", str(value)])
+
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(result.stdout[-3000:])
         print(result.stderr[-3000:])
         raise RuntimeError("chemprop training failed; see output above.")
 
-    model_path = ckpt_dir / "model_0" / "best.pt"
-    test_preds_path = ckpt_dir / "model_0" / "test_predictions.csv"
-    y_pred_test = pd.read_csv(test_preds_path)[target_col].to_numpy()
-    y_test = test_df[target_col].to_numpy()
-    assert len(y_pred_test) == len(y_test), "chemprop returned a different number of predictions than test rows"
+    preds_path = ckpt_dir / "model_0" / "test_predictions.csv"
+    y_pred = pd.read_csv(preds_path)[target_col].to_numpy()
+    y_eval = eval_df[target_col].to_numpy()
+    assert len(y_pred) == len(y_eval), "chemprop returned a different number of predictions than eval rows"
+    return {"model": None, "y_pred": y_pred, **evaluate_predictions(y_eval, y_pred), "work_dir": str(work_dir)}
 
-    # chemprop train only writes test_predictions.csv; get val predictions with a
-    # separate predict call against the checkpoint it just saved.
-    val_preds_path = work_dir / "val_predictions.csv"
-    predict_cmd = [
+
+def predict_chemprop(work_dir, df, smiles_col="smiles"):
+    """Predict with an already-trained chemprop checkpoint (the work_dir a run_chemprop call
+    returned) on new molecules, without retraining.
+
+    Used by Step 6 to apply Step 5's already-trained ensemble to data/real.csv.
+    """
+    work_dir = Path(work_dir)
+    checkpoint_path = work_dir / "checkpoint" / "model_0" / "best.pt"
+    input_path = work_dir / "predict_input.csv"
+    output_path = work_dir / "predict_output.csv"
+    df[[smiles_col]].to_csv(input_path, index=False)
+
+    cmd = [
         _chemprop_executable(), "predict",
-        "-i", str(val_path),
-        "--model-paths", str(model_path),
-        "-o", str(val_preds_path),
+        "-i", str(input_path),
         "-s", smiles_col,
+        "--model-paths", str(checkpoint_path),
+        "-o", str(output_path),
         "--accelerator", "cpu",
-        "-n", "0",
     ]
-    result = subprocess.run(predict_cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(result.stdout[-3000:])
         print(result.stderr[-3000:])
-        raise RuntimeError("chemprop predict (on val) failed; see output above.")
-    y_pred_val = pd.read_csv(val_preds_path)[target_col].to_numpy()
-    y_val = val_df[target_col].to_numpy()
-    assert len(y_pred_val) == len(y_val), "chemprop returned a different number of predictions than val rows"
+        raise RuntimeError("chemprop predict failed; see output above.")
 
-    return {
-        **_val_test_result(None, y_val, y_pred_val, y_test, y_pred_test),
-        "work_dir": str(work_dir),
-    }
+    # chemprop names the prediction column after whatever target the checkpoint was trained
+    # on; read positionally instead of relying on that name.
+    return pd.read_csv(output_path).iloc[:, -1].to_numpy()
 
 
 MODEL_RUNNERS = {
     "random_forest": run_random_forest,
-    "xgboost": run_xgboost,
 }

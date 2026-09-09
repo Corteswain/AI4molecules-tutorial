@@ -22,7 +22,7 @@ not saved up for the end):
    Comes first because it only depends on the SMILES and target, not on any later choice.
    Includes a diagnostic plot: Butina clustering (Tanimoto similarity) as a fixed structural
    reference, with train/test membership shown on t-SNE and PCA projections side by side.
-1. **Model choice** — Random Forest / XGBoost on hand-crafted features, or Chemprop
+1. **Model choice** — Random Forest on hand-crafted features, or Chemprop
    (a message-passing graph neural network) learning its own representation. Comes before
    Step 2 because it determines whether that step even applies.
 2. **Representation** — Morgan fingerprints, MACCS keys, or RDKit physicochemical
@@ -34,11 +34,17 @@ not saved up for the end):
 ```
 notebooks/AI4molecules_tutorial.ipynb   the tutorial notebook (open this in Colab)
 scripts/run_local.py                    plain-script version for local testing (no Jupyter needed)
-utils/splitting.py                      train/test splitting functions (Step 0)
-utils/models.py                         model training/evaluation functions (Steps 1 & 3)
-utils/representations.py                featurization functions (Step 2)
+scripts/make_holdout.py                 one-time data prep: carves data.csv/real.csv out of esol.csv
+utils/cleaning.py                       SMILES cleaning/standardization functions
+utils/splitting.py                      train/val splitting functions
+utils/models.py                         model training/evaluation functions
+utils/representations.py                featurization functions
 utils/viz.py                            diagnostic plots (e.g. split visualization)
-data/esol.csv                           ESOL solubility dataset
+data/esol.csv                           ESOL solubility dataset, as originally sourced
+data/data.csv                           ~90% of esol.csv — what the notebook actually loads
+data/real.csv                           the other ~10%, a Butina-clustering-based holdout kept
+                                         completely outside the notebook — hand it out after the
+                                         tutorial as "new" data to evaluate the finished model on
 ```
 
 The notebook imports functions from `utils/` and lets participants pick between them by
@@ -61,7 +67,7 @@ PNGs under `outputs/` instead of shown inline):
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python scripts/run_local.py                                              # defaults: random / random_forest / morgan
-python scripts/run_local.py --split scaffold --model xgboost --representation maccs
+python scripts/run_local.py --split scaffold --model random_forest --representation maccs
 python scripts/run_local.py --model chemprop --epochs 20
 ```
 
@@ -69,4 +75,10 @@ python scripts/run_local.py --model chemprop --epochs 20
 
 [ESOL (Delaney, 2004)](https://pubs.acs.org/doi/10.1021/ci034243x): measured aqueous
 solubility for 1,128 small organic molecules, sourced via
-[MoleculeNet](https://moleculenet.org/)/DeepChem.
+[MoleculeNet](https://moleculenet.org/)/DeepChem, saved as `data/esol.csv`.
+
+`scripts/make_holdout.py` splits this once into `data/data.csv` (what the notebook uses)
+and `data/real.csv` (held out via Butina clustering — whole clusters, not random rows, so
+it's a genuine structural holdout, not just excluded rows). Re-running that script picks
+different molecules unless you keep `--seed` fixed, so don't re-run it after you've
+already handed `real.csv` out — that would silently change what "unseen" means.
