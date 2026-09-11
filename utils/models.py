@@ -22,6 +22,15 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 
+# Chemprop's default atom featurizer one-hots atomic number over ~37 elements (H through Kr,
+# plus iodine) since it's built for arbitrary molecules. ESOL only ever contains C, O, N, Cl,
+# S, F, Br, P, and I — chemprop's built-in "organic" scheme (H, B, C, N, O, F, Si, P, S, Cl,
+# Br, I) already covers that as a subset, cutting the atom feature vector from 72 to 44 values
+# without risking a crash on anything ESOL could actually contain. Must match between training
+# and prediction — chemprop stores the trained weights but not this choice, so a mismatch
+# fails loudly with a dimension error rather than silently giving wrong predictions.
+ATOM_FEATURIZER_MODE = "organic"
+
 
 def _chemprop_executable():
     """Locate the chemprop console script, preferring the one next to the running interpreter.
@@ -104,6 +113,7 @@ def run_chemprop(
         "--accelerator", "cpu",
         "-n", "0",
         "--pytorch-seed", str(seed),
+        "--multi-hot-atom-featurizer-mode", ATOM_FEATURIZER_MODE,
     ]
     for key, value in hparams.items():
         cmd.extend([f"--{key.replace('_', '-')}", str(value)])
@@ -140,6 +150,7 @@ def predict_chemprop(work_dir, df, smiles_col="smiles"):
         "--model-paths", str(checkpoint_path),
         "-o", str(output_path),
         "--accelerator", "cpu",
+        "--multi-hot-atom-featurizer-mode", ATOM_FEATURIZER_MODE,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
