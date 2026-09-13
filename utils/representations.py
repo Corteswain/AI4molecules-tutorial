@@ -20,7 +20,7 @@ def _mols_from_smiles(smiles_list):
     return mols
 
 
-def featurize_morgan_fingerprint(smiles_list, radius=2, n_bits=2048):
+def featurize_morgan_fingerprint(smiles_list, radius=2, n_bits=1024):
     """Morgan (circular) fingerprints: bit vectors encoding local substructures."""
     mols = _mols_from_smiles(smiles_list)
     generator = AllChem.GetMorganGenerator(radius=radius, fpSize=n_bits)
