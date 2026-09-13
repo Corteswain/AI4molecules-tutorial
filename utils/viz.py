@@ -8,12 +8,12 @@ called as a single cell in the notebook right after a decision is made.
 import numpy as np
 import matplotlib.pyplot as plt
 from rdkit import Chem, DataStructs
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, Draw
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
 from .representations import featurize_morgan_fingerprint
-from .splitting import butina_cluster_ids
+from .splitting import butina_cluster_ids, group_labels
 
 # Shared palette (viridis) so train/val always render in the same two colors
 # everywhere in the tutorial, not just within this module.
@@ -71,6 +71,48 @@ def low_dimensional_representation(df, train_idx, val_idx, smiles_col="smiles", 
 
     print(f"{mixed}/{n_clusters} Butina clusters ({frac_mixed:.0%}) contain both train and val molecules.")
     return {"n_clusters": int(n_clusters), "frac_mixed_clusters": float(frac_mixed)}
+
+
+def cluster_sample_grid(df, method, smiles_col="smiles", n_show=9, seed=42):
+    """Draw one molecule from each of `n_show` different clusters, in a grid, for a gut check.
+
+    Uses the same per-molecule grouping `method`_split relies on to decide what counts as
+    "similar" (whole scaffolds/clusters kept together — see group_labels). Numbers like
+    frac_mixed_clusters or k-NN similarity tell you how structurally distinct a split's
+    clusters are on average, but they can't tell you whether that notion of "distinct"
+    matches chemical intuition. Looking at one representative per cluster side by side is
+    a quick way to sanity-check that: for `method="random"`, every molecule is its own
+    singleton cluster, so this just shows `n_show` unrelated molecules; for
+    scaffold/kmeans/butina it shows how varied (or how similar) the method's clusters
+    really look.
+    """
+    labels = group_labels(df, method, smiles_col=smiles_col, seed=seed)
+    unique_clusters = np.unique(labels)
+
+    rng = np.random.RandomState(seed)
+    n_show = min(n_show, len(unique_clusters))
+    chosen_clusters = rng.choice(unique_clusters, size=n_show, replace=False)
+
+    mols, titles = [], []
+    for cid in chosen_clusters:
+        members = np.flatnonzero(labels == cid)
+        i = rng.choice(members)
+        mols.append(Chem.MolFromSmiles(df[smiles_col].iloc[i]))
+        titles.append(f"cluster {cid}  (n={len(members)})")
+
+    n_cols = int(np.ceil(np.sqrt(n_show)))
+    n_rows = int(np.ceil(n_show / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows))
+    axes = np.atleast_1d(axes).flatten()
+    for ax, mol, title in zip(axes, mols, titles):
+        ax.imshow(Draw.MolToImage(mol, size=(300, 300)))
+        ax.set_title(title, fontsize=9)
+        ax.axis("off")
+    for ax in axes[len(mols):]:
+        ax.axis("off")
+
+    plt.tight_layout()
+    plt.show()
 
 
 def nearest_neighbor_similarity(df, splits, smiles_col="smiles", k=5):

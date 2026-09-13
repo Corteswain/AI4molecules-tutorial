@@ -1,15 +1,9 @@
 # AI4molecules — Tutorial
 
 A 75-minute, hands-on tutorial introducing machine learning for chemistry, designed for a
-conference workshop. Runs entirely in [Google Colab](https://colab.research.google.com/) —
-no local installation needed.
+conference workshop. Runs entirely in Google Colab.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Corteswain/AI4molecules-tutorial/blob/main/notebooks/AI4molecules_tutorial.ipynb)
-
-> **This repository must be public** for the badge above and the notebook's setup cell
-> (which does `git clone`) to work for participants — Colab has no access to your GitHub
-> credentials. Set visibility under repo **Settings → General → Danger Zone → Change visibility**
-> before the workshop.
 
 ## What it covers
 
@@ -59,9 +53,6 @@ local setup required.
 
 **Locally, in Jupyter:** clone the repo, `pip install -r requirements.txt`, and open
 `notebooks/AI4molecules_tutorial.ipynb` from the repo root.
-
-**Locally, as a plain script** (for quick testing without Jupyter — plots are saved as
-PNGs under `outputs/` instead of shown inline):
 
 ```
 python3 -m venv .venv && source .venv/bin/activate

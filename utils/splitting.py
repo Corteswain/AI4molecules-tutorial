@@ -199,13 +199,14 @@ SPLITTERS = {
 }
 
 
-def _group_labels(df, method, smiles_col="smiles", seed=42):
+def group_labels(df, method, smiles_col="smiles", seed=42):
     """Per-molecule group id for `method`'s notion of "similar molecules" — the same grouping
     random_split/scaffold_split/kmeans_split/butina_split use to decide what can and can't be
     split across train/val. Used by nested_cv_splits, which needs the same grouping to build
     k-fold partitions instead of a single train/val split; computed independently here (rather
     than shared with the four functions above) so their exact, already-tested train/val output
-    for a given seed can't shift as a side effect of this addition.
+    for a given seed can't shift as a side effect of this addition. Also used by
+    utils.viz.cluster_sample_grid to show what a method's clusters actually look like.
     """
     if method == "random":
         return np.arange(len(df))
@@ -266,7 +267,7 @@ def nested_cv_splits(df, method, smiles_col="smiles", k_outer=5, k_inner=5, seed
     built — just repeated k_outer * k_inner times so each test fold gets k_inner independently
     trained models instead of one.
     """
-    labels = _group_labels(df, method, smiles_col=smiles_col, seed=seed)
+    labels = group_labels(df, method, smiles_col=smiles_col, seed=seed)
     n = len(df)
     outer_folds = _balanced_kfold_partition(labels, np.arange(n), k_outer, seed)
 
