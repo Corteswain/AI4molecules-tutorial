@@ -1,6 +1,7 @@
 """Nested cross-validation for the AI4molecules tutorial (Step 5).
 
-Step 5's 3x3 nested CV (9 trained models) is slow enough that running it synchronously would
+Step 5's 3x3 nested CV (9 trained models, plus one small hyperparameter search shared across
+all of them — see _run_nested_cv) is slow enough that running it synchronously would
 eat into time better spent discussing Steps 4-5. NestedCVJob runs it on a background thread
 instead, so it can be started as soon as Step 4 has a MODEL/SPLIT_METHOD/REPRESENTATION and a
 hyperparameter grid to reuse, and finishes (or gets closer to finishing) while the tutorial
@@ -86,6 +87,23 @@ def _run_nested_cv(df, split_method, model, representation, param_grid, target_c
                     k_outer, k_inner, epochs, seed, cv_results, ensemble):
     nested = nested_cv_splits(df, method=split_method, k_outer=k_outer, k_inner=k_inner, seed=seed)
 
+    # Cheat a little: pick one hyperparameter config up front, using only the first outer
+    # fold's first inner split, and reuse it for all k_outer * k_inner models below instead
+    # of re-running the search on every one of them. This trades tuning each fold against its
+    # own inner-val (the "proper" version) for roughly a third of the training calls.
+    tune_train_idx, tune_val_idx = nested[0]["inner_splits"][0]
+    tune_train_df = df.iloc[tune_train_idx].reset_index(drop=True)
+    tune_val_df = df.iloc[tune_val_idx].reset_index(drop=True)
+    if model == "chemprop":
+        trials = [(p, run_chemprop(tune_train_df, tune_val_df, target_col=target_col, epochs=epochs, **p)) for p in param_grid]
+    else:
+        y_tune_train = df[target_col].values[tune_train_idx]
+        y_tune_val = df[target_col].values[tune_val_idx]
+        X_tune_train = REPRESENTATIONS[representation](tune_train_df["smiles"].tolist())
+        X_tune_val = REPRESENTATIONS[representation](tune_val_df["smiles"].tolist())
+        trials = [(p, MODEL_RUNNERS[model](X_tune_train, y_tune_train, X_tune_val, y_tune_val, **p)) for p in param_grid]
+    best_params, _ = min(trials, key=lambda pr: pr[1]["rmse"])
+
     for outer_i, fold in enumerate(nested):
         test_idx = fold["test_idx"]
         outer_test_df = df.iloc[test_idx].reset_index(drop=True)
@@ -95,24 +113,19 @@ def _run_nested_cv(df, split_method, model, representation, param_grid, target_c
 
         for inner_j, (in_train_idx, in_val_idx) in enumerate(fold["inner_splits"]):
             in_train_df = df.iloc[in_train_idx].reset_index(drop=True)
-            in_val_df = df.iloc[in_val_idx].reset_index(drop=True)
-            y_in_train = df[target_col].values[in_train_idx]
-            y_in_val = df[target_col].values[in_val_idx]
 
             if model == "chemprop":
-                # Select the best config on inner-val only (same as Step 4)...
-                trials = [(p, run_chemprop(in_train_df, in_val_df, target_col=target_col, epochs=epochs, **p)) for p in param_grid]
-                best_params, _ = min(trials, key=lambda pr: pr[1]["rmse"])
-                # ...then retrain with that config to get real predictions on the outer test fold.
+                # in_val_df still plays its normal early-stopping role in training — it's
+                # only the hyperparameter *choice* above that's shared across every fold.
+                in_val_df = df.iloc[in_val_idx].reset_index(drop=True)
                 best = run_chemprop(in_train_df, in_val_df, test_df=outer_test_df, target_col=target_col, epochs=epochs, **best_params)
                 y_pred = best["y_pred"]
                 ensemble.append({"model": None, "work_dir": best["work_dir"]})
             else:
+                y_in_train = df[target_col].values[in_train_idx]
                 X_in_train = REPRESENTATIONS[representation](in_train_df["smiles"].tolist())
-                X_in_val = REPRESENTATIONS[representation](in_val_df["smiles"].tolist())
-                trials = [(p, MODEL_RUNNERS[model](X_in_train, y_in_train, X_in_val, y_in_val, **p)) for p in param_grid]
-                best_params, best = min(trials, key=lambda pr: pr[1]["rmse"])
-                y_pred = best["model"].predict(X_outer_test)
+                best = MODEL_RUNNERS[model](X_in_train, y_in_train, X_outer_test, y_outer_test, **best_params)
+                y_pred = best["y_pred"]
                 ensemble.append({"model": best["model"], "work_dir": None})
 
             r2 = r2_score(y_outer_test, y_pred)

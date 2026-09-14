@@ -50,27 +50,6 @@ def _chemprop_executable():
     )
 
 
-def _count_chemprop_params(checkpoint_path):
-    """Count a trained chemprop model's trainable parameters, in a fresh subprocess.
-
-    Loading the checkpoint via chemprop's Python API (torch) directly in *this* process
-    reliably segfaults/hangs here right after this same process has already shelled out
-    to the `chemprop` CLI (itself a torch/lightning process) — some clash between the two
-    in-process torch initializations. Doing it in a brand-new subprocess sidesteps that.
-    """
-    code = (
-        "from chemprop.models import MPNN\n"
-        f"m = MPNN.load_from_file({str(checkpoint_path)!r})\n"
-        "print(sum(p.numel() for p in m.parameters() if p.requires_grad))\n"
-    )
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
-    if result.returncode != 0:
-        print(result.stdout[-2000:])
-        print(result.stderr[-2000:])
-        raise RuntimeError("Counting chemprop's trainable parameters failed; see output above.")
-    return int(result.stdout.strip())
-
-
 def evaluate_predictions(y_true, y_pred):
     rmse = float(mean_squared_error(y_true, y_pred) ** 0.5)
     r2 = float(r2_score(y_true, y_pred))
@@ -82,13 +61,7 @@ def run_random_forest(X_train, y_train, X_val, y_val, seed=42, **kwargs):
     model = RandomForestRegressor(random_state=seed, n_jobs=-1, **params)
     model.fit(X_train, y_train)
     y_pred = model.predict(X_val)
-
-    # A Random Forest has no fixed weight vector the way a neural net does; the closest analog
-    # to "trainable parameters" is the total number of decision nodes actually grown across
-    # every tree (each one holding a learned split threshold/feature, or a learned leaf value).
-    n_params = int(sum(tree.tree_.node_count for tree in model.estimators_))
-
-    return {"model": model, "y_pred": y_pred, "n_params": n_params, **evaluate_predictions(y_val, y_pred)}
+    return {"model": model, "y_pred": y_pred, **evaluate_predictions(y_val, y_pred)}
 
 
 def run_chemprop(
@@ -156,12 +129,9 @@ def run_chemprop(
     y_eval = eval_df[target_col].to_numpy()
     assert len(y_pred) == len(y_eval), "chemprop returned a different number of predictions than eval rows"
 
-    n_params = _count_chemprop_params(ckpt_dir / "model_0" / "best.pt")
-
     return {
         "model": None,
         "y_pred": y_pred,
-        "n_params": n_params,
         **evaluate_predictions(y_eval, y_pred),
         "work_dir": str(work_dir),
     }
