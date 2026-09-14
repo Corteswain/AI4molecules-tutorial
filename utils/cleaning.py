@@ -54,35 +54,35 @@ def remove_salts(df, smiles_col="smiles"):
 
 
 def remove_stereochemistry(df, smiles_col="smiles"):
-    """Strip chiral tags and E/Z bond stereo (e.g. "C/C=C/C" -> "CC=CC").
+    """Strip chiral tags only (e.g. "C[C@H](N)Cl" -> "CC(N)Cl"); E/Z bond stereo is left
+    untouched (e.g. "C/C=C/C" stays "C/C=C/C").
 
-    Reports tetrahedral (chiral-center) and E/Z (double-bond) stereochemistry
-    separately, since they're different kinds of stereo information: how many
-    molecules had exactly one tetrahedral stereocenter removed, how many had two or
-    more, and how many had any E/Z double-bond stereochemistry removed.
+    Only tetrahedral (chiral-center) stereochemistry is a real modeling choice worth
+    dropping here — see the discussion in the notebook. E/Z double-bond stereochemistry
+    changes the molecule's shape enough that collapsing it would conflate genuinely
+    different compounds, so it's kept. Reports how many molecules had exactly one
+    tetrahedral stereocenter removed and how many had two or more.
     """
     df = df.copy()
     new_smiles = []
-    n_one_chiral, n_multi_chiral, n_ez = 0, 0, 0
+    n_one_chiral, n_multi_chiral = 0, 0
     for smi in df[smiles_col]:
         mol = Chem.MolFromSmiles(smi)
         n_chiral = len(Chem.FindMolChiralCenters(mol, includeUnassigned=False, useLegacyImplementation=False))
-        has_ez = any(b.GetStereo() != Chem.BondStereo.STEREONONE for b in mol.GetBonds())
 
-        Chem.RemoveStereochemistry(mol)
+        for atom in mol.GetAtoms():
+            atom.SetChiralTag(Chem.ChiralType.CHI_UNSPECIFIED)
+        Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
         new_smiles.append(Chem.MolToSmiles(mol))
 
         if n_chiral == 1:
             n_one_chiral += 1
         elif n_chiral >= 2:
             n_multi_chiral += 1
-        if has_ez:
-            n_ez += 1
     df[smiles_col] = new_smiles
     print(
         f"remove_stereochemistry: {n_one_chiral} molecule(s) had exactly 1 tetrahedral stereocenter removed, "
-        f"{n_multi_chiral} molecule(s) had 2+ tetrahedral stereocenters removed, "
-        f"{n_ez} molecule(s) had E/Z (double-bond) stereochemistry removed"
+        f"{n_multi_chiral} molecule(s) had 2+ tetrahedral stereocenters removed"
     )
     return df
 
