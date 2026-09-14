@@ -1,22 +1,10 @@
 """Nested cross-validation for the AI4molecules tutorial (Step 5).
 
-Step 5's 3x3 nested CV (9 trained models, plus one small hyperparameter search shared across
-all of them — see _run_nested_cv) is slow enough that running it synchronously would
-eat into time better spent discussing Steps 4-5. NestedCVJob runs it on a background thread
-instead, so it can be started as soon as Step 4 has a MODEL/SPLIT_METHOD/REPRESENTATION and a
-hyperparameter grid to reuse, and finishes (or gets closer to finishing) while the tutorial
-moves through Step 4's discussion and Step 5's intro. Step 5's own cell just calls .wait() —
-if the background job is already done by then, that returns immediately; if not, it blocks
-until it is, same as running it synchronously would have.
-
-A thread (not a process) is used deliberately: the heavy work here is either a `chemprop`
-subprocess call (which releases the GIL while the OS runs the subprocess, so the main thread
-stays free) or a scikit-learn fit (which releases the GIL for its own C-level work), so a
-background thread gets real concurrency without the complications of passing fitted models or
-DataFrames across a process boundary.
+Step 5's 3x3 nested CV reuses the single hyperparameter config Step 4 already picked (via its
+own quick search against the Step 1 train/val split) instead of tuning again here — a
+deliberate simplification ("cheating" a little) that keeps this fast enough to just run
+synchronously, right in Step 5, with no background job needed.
 """
-
-import threading
 
 from sklearn.metrics import r2_score
 from scipy.stats import spearmanr
@@ -26,83 +14,19 @@ from .representations import REPRESENTATIONS
 from .splitting import nested_cv_splits
 
 
-class NestedCVJob:
-    """Runs a k_outer x k_inner nested CV (see splitting.nested_cv_splits) on a background
-    thread, filling in .cv_results and .ensemble as models finish training.
+def run_nested_cv(df, split_method, model, representation, best_params, target_col,
+                   k_outer=3, k_inner=3, epochs=15, seed=42):
+    """Train k_outer * k_inner models, one per (outer test fold, inner train/val split) pair,
+    all using the same `best_params` (e.g. Step 4's already-chosen config) rather than
+    re-tuning per fold.
 
-    cv_results and ensemble are plain lists, appended to only from the background thread;
-    reading them before .wait() returns can show a partial, still-growing result.
+    Returns (cv_results, ensemble):
+      - cv_results: a list of {"outer_fold", "inner_split", "r2", "spearman"} dicts.
+      - ensemble: a list of {"model", "work_dir"} dicts (exactly one of the two set,
+        depending on `model`) — Step 6 applies these directly to data/real.csv.
     """
-
-    def __init__(
-        self,
-        df,
-        split_method,
-        model,
-        representation,
-        param_grid,
-        target_col,
-        k_outer=3,
-        k_inner=3,
-        epochs=15,
-        seed=42,
-    ):
-        self.cv_results = []
-        self.ensemble = []
-        self._done = threading.Event()
-        self._error = None
-        self._thread = threading.Thread(
-            target=self._run,
-            args=(df, split_method, model, representation, param_grid, target_col, k_outer, k_inner, epochs, seed),
-            daemon=True,
-        )
-        self._thread.start()
-
-    def _run(self, df, split_method, model, representation, param_grid, target_col, k_outer, k_inner, epochs, seed):
-        try:
-            _run_nested_cv(
-                df, split_method, model, representation, param_grid, target_col,
-                k_outer, k_inner, epochs, seed, self.cv_results, self.ensemble,
-            )
-        except Exception as e:
-            self._error = e
-        finally:
-            self._done.set()
-
-    @property
-    def is_done(self):
-        return self._done.is_set()
-
-    def wait(self):
-        """Block until the background job finishes; re-raise any exception it hit."""
-        if not self._done.is_set():
-            print("Waiting for the background 3x3 cross-validation to finish...")
-        self._thread.join()
-        if self._error is not None:
-            raise self._error
-        print(f"Background CV done: {len(self.ensemble)} models trained.")
-
-
-def _run_nested_cv(df, split_method, model, representation, param_grid, target_col,
-                    k_outer, k_inner, epochs, seed, cv_results, ensemble):
     nested = nested_cv_splits(df, method=split_method, k_outer=k_outer, k_inner=k_inner, seed=seed)
-
-    # Cheat a little: pick one hyperparameter config up front, using only the first outer
-    # fold's first inner split, and reuse it for all k_outer * k_inner models below instead
-    # of re-running the search on every one of them. This trades tuning each fold against its
-    # own inner-val (the "proper" version) for roughly a third of the training calls.
-    tune_train_idx, tune_val_idx = nested[0]["inner_splits"][0]
-    tune_train_df = df.iloc[tune_train_idx].reset_index(drop=True)
-    tune_val_df = df.iloc[tune_val_idx].reset_index(drop=True)
-    if model == "chemprop":
-        trials = [(p, run_chemprop(tune_train_df, tune_val_df, target_col=target_col, epochs=epochs, **p)) for p in param_grid]
-    else:
-        y_tune_train = df[target_col].values[tune_train_idx]
-        y_tune_val = df[target_col].values[tune_val_idx]
-        X_tune_train = REPRESENTATIONS[representation](tune_train_df["smiles"].tolist())
-        X_tune_val = REPRESENTATIONS[representation](tune_val_df["smiles"].tolist())
-        trials = [(p, MODEL_RUNNERS[model](X_tune_train, y_tune_train, X_tune_val, y_tune_val, **p)) for p in param_grid]
-    best_params, _ = min(trials, key=lambda pr: pr[1]["rmse"])
+    cv_results, ensemble = [], []
 
     for outer_i, fold in enumerate(nested):
         test_idx = fold["test_idx"]
@@ -115,8 +39,7 @@ def _run_nested_cv(df, split_method, model, representation, param_grid, target_c
             in_train_df = df.iloc[in_train_idx].reset_index(drop=True)
 
             if model == "chemprop":
-                # in_val_df still plays its normal early-stopping role in training — it's
-                # only the hyperparameter *choice* above that's shared across every fold.
+                # in_val_df still plays its normal early-stopping role in training.
                 in_val_df = df.iloc[in_val_idx].reset_index(drop=True)
                 best = run_chemprop(in_train_df, in_val_df, test_df=outer_test_df, target_col=target_col, epochs=epochs, **best_params)
                 y_pred = best["y_pred"]
@@ -130,4 +53,7 @@ def _run_nested_cv(df, split_method, model, representation, param_grid, target_c
 
             r2 = r2_score(y_outer_test, y_pred)
             rho = spearmanr(y_outer_test, y_pred).correlation
-            cv_results.append({"outer_fold": outer_i, "inner_split": inner_j, "best_params": best_params, "r2": r2, "spearman": rho})
+            print(f"  outer fold {outer_i}, inner split {inner_j}: R2 = {r2:.3f}   spearman = {rho:.3f}")
+            cv_results.append({"outer_fold": outer_i, "inner_split": inner_j, "r2": r2, "spearman": rho})
+
+    return cv_results, ensemble
